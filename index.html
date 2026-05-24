@@ -1,0 +1,2630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Origin UGC — Outreach Pipeline</title>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{background:#0F1117;font-family:"Outfit",system-ui,sans-serif}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#28344D;border-radius:4px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const {
+  useState,
+  useEffect,
+  useMemo,
+  useRef
+} = React;
+const API_URL = "https://api.anthropic.com/v1/messages";
+const STORAGE_KEY = "originugc_pipeline_v1";
+const GS_URL = "https://script.google.com/macros/s/AKfycbyWeB9p8BkltficS8ntLjS8SEFjKlpmJAUGeuZuF9f05NoT_QMjHFosShyrzXJJ4T-hYQ/exec";
+async function sbLoad() {
+  // Load from both sources, pick whichever has more leads
+  const local = localStorage.getItem("originugc_v1");
+  const localData = local ? JSON.parse(local) : null;
+  const localCount = localData && localData.leads ? localData.leads.length : 0;
+  try {
+    const r = await fetch(GS_URL + "?t=" + Date.now()); // bust cache
+    if (r.ok) {
+      const text = await r.text();
+      const sheetData = JSON.parse(text);
+      const sheetCount = sheetData && sheetData.leads ? sheetData.leads.length : 0;
+      console.log("Sheet leads:", sheetCount, "Local leads:", localCount);
+      if (sheetCount >= localCount && sheetCount > 0) {
+        localStorage.setItem("originugc_v1", JSON.stringify(sheetData));
+        return sheetData;
+      }
+    }
+  } catch (e) {
+    console.log("GS load failed:", e.message);
+  }
+  return localData;
+}
+async function sbSave(payload) {
+  // Save to localStorage immediately
+  localStorage.setItem("originugc_v1", JSON.stringify(payload));
+  // Sync to Google Sheets via GET param — survives Apps Script redirect
+  try {
+    const data = encodeURIComponent(JSON.stringify(payload));
+    const url = GS_URL + "?action=save&data=" + data;
+    // If URL is too long, skip cloud sync (localStorage still has it)
+    if (url.length > 8000) return "local";
+    await fetch(url, {
+      mode: "cors"
+    });
+    return "cloud";
+  } catch (e) {
+    return "local";
+  }
+}
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+const FREE_MODELS = [{
+  id: "google/gemma-2-9b-it:free",
+  label: "Gemma 2 9B",
+  tag: "Recommended ★"
+}, {
+  id: "google/gemma-4-31b-it:free",
+  label: "Gemma 4 31B",
+  tag: "Creative"
+}, {
+  id: "meta-llama/llama-3.3-70b-instruct:free",
+  label: "Llama 3.3 70B",
+  tag: "Thorough"
+}, {
+  id: "mistralai/mistral-small-3.2-24b-instruct:fp8",
+  label: "Mistral Small",
+  tag: "Fast"
+}, {
+  id: "meta-llama/llama-3.1-8b-instruct",
+  label: "Llama 3.1 8B",
+  tag: "Lightweight"
+}];
+async function callOpenRouter(prompt, apiKey, modelId, retries = 2) {
+  var _data$choices;
+  const resp = await fetch(OPENROUTER_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`,
+      "HTTP-Referer": "https://majestic-kangaroo-b7a2c1.netlify.app",
+      "X-Title": "Origin UGC Pipeline"
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [{
+        role: "user",
+        content: prompt
+      }],
+      max_tokens: 1000
+    })
+  });
+  if (!resp.ok) {
+    // Retry on 429 after 15 seconds
+    if (resp.status === 429 && retries > 0) {
+      console.log("Rate limited — waiting 15s before retry...");
+      await new Promise(r => setTimeout(r, 15000));
+      return callOpenRouter(prompt, apiKey, modelId, retries - 1);
+    }
+    let errMsg = `OpenRouter error ${resp.status}`;
+    try {
+      var _errData$error;
+      const errData = await resp.json();
+      errMsg = `OpenRouter ${resp.status}: ${(errData === null || errData === void 0 || (_errData$error = errData.error) === null || _errData$error === void 0 ? void 0 : _errData$error.message) || JSON.stringify(errData)}`;
+    } catch (e) {}
+    throw new Error(errMsg);
+  }
+  const data = await resp.json();
+  return ((_data$choices = data.choices) === null || _data$choices === void 0 || (_data$choices = _data$choices[0]) === null || _data$choices === void 0 || (_data$choices = _data$choices.message) === null || _data$choices === void 0 ? void 0 : _data$choices.content) || "";
+}
+const CATEGORY_FEELINGS = {
+  fragrance: "River is genuinely obsessed with fragrance and perfume oils — wears them daily, collects them, thinks about scent the way other people think about music. This isn't a pitch. It's a real thing.",
+  perfume: "River is genuinely obsessed with fragrance and perfume oils — wears them daily, collects them, thinks about scent the way other people think about music.",
+  candle: "River loves candles in a real way — uses them intentionally to create atmosphere, wind down, make a space feel like home. Has several burning at any given time.",
+  food: "River and Kodi are genuine food lovers. Not in a performative way — in a 'this is one of life's actual pleasures and we take it seriously' way. Good food, interesting food, food with a story behind it. Working with food brands feels like a natural extension of something already real.",
+  chocolate: "River has a serious sweet tooth and a genuine love of chocolate — the craft, the flavor, the ritual of it.",
+  snack: "River snacks. Genuinely and without apology. Good snacks — flavourful, interesting, satisfying ones — are a real part of daily life. When a snack brand is also focused on health, that resonates too because River has been intentionally building a more wellness-centered life. But honestly? Even without the health angle, a great snack is a great snack.",
+  wellness: "River has been intentionally building a wellness-centered life — the products that support that feel personal, not just professional.",
+  skincare: "River is into skincare as self-care, not vanity. Clean ingredients, intentional routines, products that actually feel good to use.",
+  jewelry: "River loves jewelry — especially pieces with an edge. Gothic, alternative, anything with a story or an aesthetic that isn't generic.",
+  gothic: "River is drawn to gothic and alternative aesthetics — the jewelry, the atmosphere, the intentionality of the style.",
+  tea: "River is a tea person. The ritual of it, the variety, the way a good cup changes the texture of a moment.",
+  coffee: "River appreciates good coffee — the craft of it, the ritual, the way it anchors a morning.",
+  beauty: "River genuinely cares about beauty products that work and feel good to use — not just marketing, actual quality.",
+  hair: "River pays attention to hair care — how products make hair feel, not just look.",
+  crystal: "River is into crystals and spiritual tools as part of an intentional practice — not trend-chasing, genuine interest.",
+  occult: "River has a spiritual practice and a genuine affinity for occult and metaphysical tools and products.",
+  tarot: "River uses tarot as part of a regular practice and has a real appreciation for thoughtfully designed decks and tools.",
+  plant: "River loves plants — the aesthetic, the care, the way they make a space feel alive.",
+  home: "River cares about home as a sanctuary — products that make a space feel intentional and personal land differently.",
+  pet: "River loves animals and takes pet care seriously — products for pets feel personal."
+};
+function getCategoryFeeling(description, brandName) {
+  const text = (description + " " + brandName).toLowerCase();
+  for (const [key, feeling] of Object.entries(CATEGORY_FEELINGS)) {
+    if (text.includes(key)) return feeling;
+  }
+  return "River and Kodi are selective about the brands they reach out to — they only pitch companies whose products genuinely interest them.";
+}
+const SIGN_OFF = `River + Kodi\nOrigin UGC — We make people stop. Watch. And buy.\noriginugc.my.canva.site | @theoriginugc`;
+const KEYWORD_LIBRARY = {
+  "Fragrance & Body": {
+    icon: "🌸",
+    keywords: ["perfume oil", "pheromone perfume", "indie fragrance", "niche perfume", "body oil spray", "natural perfume", "roll on perfume", "oil based perfume", "artisan perfume", "botanical perfume", "women's fragrance", "eau de parfum"]
+  },
+  "Candles": {
+    icon: "🕯️",
+    keywords: ["soy candle", "beeswax candle", "coconut wax candle", "witchy candle", "crystal candle", "botanical candle", "luxury candle", "wood wick candle", "ritual candle", "intention candle", "whimsigoth candle", "scented candle gift"]
+  },
+  "Gothic & Alt": {
+    icon: "🖤",
+    keywords: ["gothic jewelry", "witchy jewelry", "dark aesthetic jewelry", "occult jewelry", "gothic accessories", "whimsigoth", "dark cottagecore", "gothic handbag", "alternative accessories", "dark feminine jewelry", "gothic ring", "alt fashion"]
+  },
+  "Crystals & Spiritual": {
+    icon: "🔮",
+    keywords: ["rose quartz", "crystal healing", "amethyst crystal", "crystal set", "manifestation crystals", "healing stones", "chakra crystals", "spiritual gifts", "crystal jewelry", "selenite", "obsidian", "crystal tower"]
+  },
+  "Skincare": {
+    icon: "✨",
+    keywords: ["clean skincare", "natural skincare", "glow serum", "vitamin C serum", "barrier cream", "tallow moisturizer", "retinol serum", "hyaluronic acid", "face oil", "glass skin", "indie skincare", "slugging skincare"]
+  },
+  "Snacks & Food": {
+    icon: "🍜",
+    keywords: ["asian snacks", "korean snacks", "japanese snacks", "thai food", "vietnamese food", "specialty snacks", "canadian snacks", "american snacks", "european snacks", "caribbean food", "mexican snacks", "exotic snacks"]
+  },
+  "Chocolate & Sweets": {
+    icon: "🍫",
+    keywords: ["dark chocolate bar", "bean to bar chocolate", "craft chocolate", "single origin chocolate", "vegan chocolate", "bonbons", "artisan chocolate", "chocolate truffles", "filled chocolate", "gourmet chocolate", "canadian chocolate", "european chocolate"]
+  },
+  "Condiments & Sauces": {
+    icon: "🫙",
+    keywords: ["artisan hot sauce", "small batch condiment", "craft hot sauce", "specialty sauce", "gourmet jam", "artisan mustard", "chili oil", "fermented hot sauce", "BBQ sauce", "flavored mayo", "craft pickle", "specialty ketchup"]
+  },
+  "Coffee & Tea": {
+    icon: "☕",
+    keywords: ["loose leaf tea", "herbal tea blend", "mushroom coffee", "matcha powder", "adaptogen coffee", "ceremonial cacao", "functional tea", "specialty coffee", "cold brew", "chai blend", "reishi coffee", "lion's mane coffee"]
+  },
+  "Wine": {
+    icon: "🍷",
+    keywords: ["natural wine", "Ontario wine", "Canadian wine", "small batch wine", "orange wine", "biodynamic wine", "craft winery", "pét-nat", "skin contact wine", "Quebec wine", "BC wine", "low intervention wine"]
+  },
+  "Wellness & Supplements": {
+    icon: "🌿",
+    keywords: ["sea moss gel", "black seed oil", "shilajit", "magnesium supplement", "collagen powder", "lion's mane", "gut health supplement", "adaptogen supplement", "functional mushroom", "ashwagandha", "elderberry", "womens wellness supplement"]
+  },
+  "Home & Altar": {
+    icon: "🏠",
+    keywords: ["incense sticks", "altar supplies", "home fragrance", "palo santo", "smudge kit", "resin incense", "ritual supplies", "spiritual home decor", "witch aesthetic decor", "dark home decor", "aesthetic room decor", "witchy home"]
+  },
+  "Feminine Care": {
+    icon: "🌺",
+    keywords: ["yoni steam", "pH balanced wash", "feminine care", "period care", "menstrual wellness", "natural feminine hygiene", "cycle wellness", "womb care", "herbal feminine wash", "period underwear", "menstrual cup", "cycle syncing"]
+  },
+  "Cannabis & CBD": {
+    icon: "🍃",
+    keywords: ["CBD oil", "hemp wellness", "CBD skincare", "hemp body care", "CBD gummies", "full spectrum CBD", "hemp seed oil", "CBD tincture", "cannabidiol", "hemp extract", "CBD balm", "plant medicine"]
+  },
+  "Books & Oracle": {
+    icon: "📚",
+    keywords: ["oracle deck", "tarot deck", "spiritual journal", "affirmation cards", "witch journal", "shadow work journal", "self published book", "indie author", "dark romance book", "spiritual book", "manifestation journal", "moon journal"]
+  },
+  "Jewelry": {
+    icon: "💍",
+    keywords: ["handmade jewelry", "spiritual jewelry", "African inspired jewelry", "beaded jewelry", "statement ring", "layering necklace", "gothic ring", "crystal jewelry", "moon jewelry", "celestial jewelry", "witchy jewelry", "indie jewelry brand"]
+  }
+};
+function getFbPageId(url) {
+  if (!url) return null;
+  // Match numeric page ID from facebook.com URLs
+  const match = url.match(/facebook\.com\/(\d{10,})/);
+  if (match) return match[1];
+  return null;
+}
+function BrandPreview({
+  lead,
+  C
+}) {
+  const {
+    useState: useSt
+  } = React;
+  const [imgError, setImgError] = useSt(false);
+  const pageId = getFbPageId(lead.website);
+  if (!pageId || imgError) return null;
+  const imgUrl = `https://graph.facebook.com/${pageId}/picture?type=large`;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: "12px",
+      padding: "12px 16px",
+      background: C.surface2,
+      borderBottom: `1px solid ${C.border}`
+    }
+  }, /*#__PURE__*/React.createElement("img", {
+    src: imgUrl,
+    onError: () => setImgError(true),
+    alt: lead.brandName,
+    style: {
+      width: "56px",
+      height: "56px",
+      borderRadius: "8px",
+      objectFit: "cover",
+      flexShrink: 0,
+      background: C.border
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "14px",
+      fontWeight: "600",
+      color: C.text,
+      marginBottom: "2px"
+    }
+  }, lead.brandName), lead.description && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: C.textMuted,
+      lineHeight: "1.4"
+    }
+  }, lead.description), lead.keyword && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.accent,
+      marginTop: "4px",
+      fontWeight: "500"
+    }
+  }, "Found via: ", lead.keyword)));
+}
+function SearchPanel({
+  C,
+  onClose
+}) {
+  const {
+    useState: useSt
+  } = React;
+  const [selectedCategory, setSelectedCategory] = useSt(null);
+  const [selectedKeywords, setSelectedKeywords] = useSt([]);
+  const toggleKeyword = kw => setSelectedKeywords(prev => prev.includes(kw) ? prev.filter(k => k !== kw) : [...prev, kw]);
+  const openMeta = kw => window.open(`https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=CA&q=${encodeURIComponent(kw)}&search_type=keyword_unordered`, "_blank");
+  const openTikTok = kw => window.open(`https://library.tiktok.com/ads?region=CA&keyword=${encodeURIComponent(kw)}&period=180`, "_blank");
+  const searchPlatform = fn => {
+    const terms = selectedKeywords.length > 0 ? selectedKeywords : selectedCategory ? KEYWORD_LIBRARY[selectedCategory].keywords.slice(0, 3) : [];
+    terms.forEach((kw, i) => setTimeout(() => fn(kw), i * 500));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.7)",
+      zIndex: 200,
+      display: "flex",
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      borderRadius: "20px 20px 0 0",
+      width: "100%",
+      maxHeight: "85vh",
+      overflowY: "auto",
+      padding: "24px 20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: "16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "18px",
+      fontWeight: "700",
+      color: C.text
+    }
+  }, "\uD83D\uDD0D Find Brands"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: C.textMuted,
+      marginTop: "2px"
+    }
+  }, "Pick niche \u2192 select keywords \u2192 search ads")), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: "transparent",
+      border: "none",
+      color: C.textMuted,
+      fontSize: "22px",
+      cursor: "pointer"
+    }
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "grid",
+      gridTemplateColumns: "repeat(3, 1fr)",
+      gap: "8px",
+      marginBottom: "20px"
+    }
+  }, Object.entries(KEYWORD_LIBRARY).map(([cat, {
+    icon
+  }]) => /*#__PURE__*/React.createElement("button", {
+    key: cat,
+    onClick: () => {
+      setSelectedCategory(cat);
+      setSelectedKeywords([]);
+    },
+    style: {
+      padding: "10px 6px",
+      background: selectedCategory === cat ? `${C.accent}20` : C.surface2,
+      border: `2px solid ${selectedCategory === cat ? C.accent : C.border}`,
+      borderRadius: "10px",
+      color: selectedCategory === cat ? C.accent : C.textMuted,
+      fontSize: "10px",
+      fontWeight: selectedCategory === cat ? "700" : "400",
+      cursor: "pointer",
+      fontFamily: "inherit",
+      textAlign: "center",
+      lineHeight: 1.4
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "20px",
+      marginBottom: "4px"
+    }
+  }, icon), cat))), selectedCategory && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      marginBottom: "10px",
+      textTransform: "uppercase"
+    }
+  }, selectedKeywords.length > 0 ? `${selectedKeywords.length} selected` : "Tap to select keywords"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: "8px",
+      marginBottom: "20px"
+    }
+  }, KEYWORD_LIBRARY[selectedCategory].keywords.map(kw => {
+    const sel = selectedKeywords.includes(kw);
+    return /*#__PURE__*/React.createElement("button", {
+      key: kw,
+      onClick: () => toggleKeyword(kw),
+      style: {
+        padding: "7px 14px",
+        background: sel ? C.accent : C.surface2,
+        border: `1px solid ${sel ? C.accent : C.border}`,
+        borderRadius: "20px",
+        color: sel ? "#fff" : C.textMuted,
+        fontSize: "12px",
+        fontWeight: sel ? "600" : "400",
+        cursor: "pointer",
+        fontFamily: "inherit"
+      }
+    }, kw);
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "8px",
+      marginBottom: "8px"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => searchPlatform(openMeta),
+    style: {
+      flex: 1,
+      padding: "13px",
+      background: "#1877F2",
+      border: "none",
+      borderRadius: "10px",
+      color: "#fff",
+      fontSize: "13px",
+      fontWeight: "700",
+      cursor: "pointer",
+      fontFamily: "inherit"
+    }
+  }, "\uD83D\uDCD8 Meta Ad Library"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => searchPlatform(openTikTok),
+    style: {
+      flex: 1,
+      padding: "13px",
+      background: "#010101",
+      border: "none",
+      borderRadius: "10px",
+      color: "#fff",
+      fontSize: "13px",
+      fontWeight: "700",
+      cursor: "pointer",
+      fontFamily: "inherit"
+    }
+  }, "\uD83C\uDFB5 TikTok Ads")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.textDim,
+      textAlign: "center"
+    }
+  }, "Opens each keyword in a new tab \u2014 spot a brand, Quick Add to pipeline"))));
+}
+const COLUMNS = [{
+  id: "new",
+  label: "New Leads",
+  short: "New",
+  accent: "#00ACC1"
+}, {
+  id: "drafting",
+  label: "Reviewing Drafts",
+  short: "Drafts",
+  accent: "#7C4DFF"
+}, {
+  id: "sent",
+  label: "Emails Sent",
+  short: "Sent",
+  accent: "#EF6C00"
+}, {
+  id: "active",
+  label: "Conversations",
+  short: "Active",
+  accent: "#2E7D32"
+}, {
+  id: "closed",
+  label: "Closed / Paused",
+  short: "Closed",
+  accent: "#546E7A"
+}];
+const DARK = {
+  bg: "#0F1117",
+  surface: "#1A2133",
+  surface2: "#232D42",
+  header: "#141824",
+  border: "#28344D",
+  accent: "#00ACC1",
+  text: "#E8EAED",
+  textMuted: "#8A94A6",
+  textDim: "#546278",
+  shadow: "0 1px 4px rgba(0,0,0,0.4)",
+  shadowHover: "0 4px 16px rgba(0,0,0,0.4)"
+};
+const LIGHT = {
+  bg: "#F8F9FA",
+  surface: "#FFFFFF",
+  surface2: "#F1F3F4",
+  header: "#FFFFFF",
+  border: "#DADCE0",
+  accent: "#0097A7",
+  text: "#202124",
+  textMuted: "#5F6368",
+  textDim: "#9AA0A6",
+  shadow: "0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.06)",
+  shadowHover: "0 4px 12px rgba(0,0,0,0.15)"
+};
+function parseJSON(text) {
+  const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+  let depth = 0,
+    start = -1;
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    if ((ch === "[" || ch === "{") && start === -1) {
+      start = i;
+      depth = 1;
+    } else if (start !== -1) {
+      if (ch === "[" || ch === "{") depth++;else if (ch === "]" || ch === "}") {
+        depth--;
+        if (depth === 0) {
+          try {
+            return JSON.parse(cleaned.slice(start, i + 1));
+          } catch {
+            start = -1;
+          }
+        }
+      }
+    }
+  }
+  return null;
+}
+async function callClaude(prompt) {
+  const resp = await fetch(API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1000,
+      messages: [{
+        role: "user",
+        content: prompt
+      }]
+    })
+  });
+  if (!resp.ok) throw new Error(`API error ${resp.status}`);
+  const data = await resp.json();
+  return (data.content || []).filter(c => c.type === "text").map(c => c.text).join("");
+}
+const nowStr = () => new Date().toLocaleDateString("en-US", {
+  month: "short",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit"
+});
+const daysSince = d => !d ? 0 : Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
+const isMissingData = lead => {
+  var _lead$brandName;
+  return !((_lead$brandName = lead.brandName) !== null && _lead$brandName !== void 0 && _lead$brandName.trim()) || lead.brandName === "Unknown";
+};
+function detectReplyType(replyText) {
+  const t = replyText.toLowerCase();
+  if (/unsubscribe|not interested|remove me|we handle this in-house|no thank|not a fit/.test(t)) return "blacklist";
+  if (/out of office|ooo|away on leave|on vacation|on holiday|be back/.test(t)) return "oot";
+  if (/too expensive|no budget|tight pricing|over budget|can't afford|not in the budget/.test(t)) return "budget";
+  if (/interested|love to|sounds good|tell me more|let's chat|would like|great timing/.test(t)) return "positive";
+  return "neutral";
+}
+const LOCAL_SERVER = 'http://localhost:7842';
+function ScraperPanel({
+  C,
+  onClose
+}) {
+  const {
+    useState: useSt,
+    useEffect: useEf
+  } = React;
+  const [status, setStatus] = useSt(null);
+  const [customKeyword, setCustomKeyword] = useSt('');
+  const [customList, setCustomList] = useSt([]);
+  const [running, setRunning] = useSt(false);
+  const [schedule, setSchedule] = useSt({
+    enabled: false,
+    days: [],
+    hour: 2
+  });
+  const [msg, setMsg] = useSt('');
+  const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  useEf(() => {
+    fetch(`${LOCAL_SERVER}/status`).then(r => r.json()).then(d => {
+      setStatus(d);
+      setRunning(d.running);
+      if (d.schedule) setSchedule(d.schedule);
+    }).catch(() => setStatus(null));
+  }, []);
+  const addKeyword = () => {
+    const kw = customKeyword.trim();
+    if (kw && !customList.includes(kw)) {
+      setCustomList(prev => [...prev, kw]);
+      setCustomKeyword('');
+    }
+  };
+  const runNow = async () => {
+    try {
+      setRunning(true);
+      setMsg('Starting scraper...');
+      const resp = await fetch(`${LOCAL_SERVER}/run`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          keywords: customList.length > 0 ? customList : null
+        })
+      });
+      const data = await resp.json();
+      if (data.started) setMsg('✓ Scraper running! New leads will appear shortly.');else if (data.running) {
+        setMsg('Already running — check back soon.');
+        setRunning(false);
+      }
+    } catch (e) {
+      setMsg('✗ Server offline — run server.js on your computer first.');
+      setRunning(false);
+    }
+  };
+  const saveSchedule = async () => {
+    try {
+      var _data$schedule;
+      const resp = await fetch(`${LOCAL_SERVER}/schedule`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(schedule)
+      });
+      const data = await resp.json();
+      setMsg((_data$schedule = data.schedule) !== null && _data$schedule !== void 0 && _data$schedule.nextRun ? `✓ Next run: ${new Date(data.schedule.nextRun).toLocaleString()}` : '✓ Schedule saved');
+    } catch (e) {
+      setMsg('✗ Server offline.');
+    }
+  };
+  const toggleDay = d => setSchedule(prev => ({
+    ...prev,
+    days: prev.days.includes(d) ? prev.days.filter(x => x !== d) : [...prev.days, d]
+  }));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.7)",
+      zIndex: 200,
+      display: "flex",
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      borderRadius: "20px 20px 0 0",
+      width: "100%",
+      maxHeight: "90vh",
+      overflowY: "auto",
+      padding: "24px 20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: "20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "18px",
+      fontWeight: "700",
+      color: C.text
+    }
+  }, "\uD83E\uDD16 Scraper Control"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: status ? "#2E7D32" : "#E53935",
+      marginTop: "2px",
+      fontWeight: "600"
+    }
+  }, status ? running ? "⏳ Running now..." : "✓ Server connected" : "✗ Server offline — run server.js on your computer")), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: "transparent",
+      border: "none",
+      color: C.textMuted,
+      fontSize: "22px",
+      cursor: "pointer"
+    }
+  }, "\u2715")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: "20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      textTransform: "uppercase",
+      marginBottom: "10px"
+    }
+  }, "Custom Keywords"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "8px",
+      marginBottom: "10px"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: customKeyword,
+    onChange: e => setCustomKeyword(e.target.value),
+    onKeyDown: e => e.key === "Enter" && addKeyword(),
+    placeholder: "e.g. kpop merch, anime figures...",
+    style: {
+      flex: 1,
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "8px",
+      padding: "10px 14px",
+      color: C.text,
+      fontSize: "14px",
+      fontFamily: "inherit",
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: addKeyword,
+    style: {
+      padding: "10px 16px",
+      background: C.accent,
+      border: "none",
+      borderRadius: "8px",
+      color: "#fff",
+      fontSize: "13px",
+      fontWeight: "600",
+      fontFamily: "inherit",
+      cursor: "pointer"
+    }
+  }, "Add")), customList.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: "6px",
+      marginBottom: "10px"
+    }
+  }, customList.map(kw => /*#__PURE__*/React.createElement("span", {
+    key: kw,
+    style: {
+      padding: "5px 10px",
+      background: `${C.accent}20`,
+      border: `1px solid ${C.accent}40`,
+      borderRadius: "16px",
+      color: C.accent,
+      fontSize: "12px",
+      fontWeight: "600",
+      display: "flex",
+      alignItems: "center",
+      gap: "6px"
+    }
+  }, kw, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setCustomList(prev => prev.filter(k => k !== kw)),
+    style: {
+      background: "transparent",
+      border: "none",
+      color: C.accent,
+      cursor: "pointer",
+      fontSize: "14px",
+      padding: 0
+    }
+  }, "\xD7")))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: C.textMuted
+    }
+  }, customList.length > 0 ? `${customList.length} custom keyword${customList.length !== 1 ? "s" : ""} added` : "No custom keywords — will use all defaults")), /*#__PURE__*/React.createElement("button", {
+    onClick: runNow,
+    disabled: running || !status,
+    style: {
+      width: "100%",
+      padding: "14px",
+      background: running || !status ? C.surface2 : C.accent,
+      border: "none",
+      borderRadius: "10px",
+      color: running || !status ? C.textMuted : "#fff",
+      fontSize: "15px",
+      fontWeight: "700",
+      fontFamily: "inherit",
+      cursor: running || !status ? "not-allowed" : "pointer",
+      marginBottom: "8px"
+    }
+  }, running ? "⏳ Scraper Running..." : "▶ Run Now"), msg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "13px",
+      color: msg.startsWith("✓") ? "#2E7D32" : msg.startsWith("✗") ? "#E53935" : C.textMuted,
+      marginBottom: "16px",
+      fontWeight: "600",
+      textAlign: "center"
+    }
+  }, msg), /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: `1px solid ${C.border}`,
+      paddingTop: "20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: "14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      textTransform: "uppercase"
+    }
+  }, "Auto Schedule"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSchedule(prev => ({
+      ...prev,
+      enabled: !prev.enabled
+    })),
+    style: {
+      padding: "5px 12px",
+      background: schedule.enabled ? "#2E7D3220" : C.surface2,
+      border: `1px solid ${schedule.enabled ? "#2E7D32" : C.border}`,
+      borderRadius: "6px",
+      color: schedule.enabled ? "#2E7D32" : C.textMuted,
+      fontSize: "12px",
+      fontWeight: "600",
+      fontFamily: "inherit",
+      cursor: "pointer"
+    }
+  }, schedule.enabled ? "ON" : "OFF")), schedule.enabled && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: C.textMuted,
+      marginBottom: "8px"
+    }
+  }, "Run on these days:"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "6px",
+      marginBottom: "14px"
+    }
+  }, DAYS.map((day, i) => /*#__PURE__*/React.createElement("button", {
+    key: day,
+    onClick: () => toggleDay(i),
+    style: {
+      flex: 1,
+      padding: "8px 0",
+      background: schedule.days.includes(i) ? C.accent : C.surface2,
+      border: `1px solid ${schedule.days.includes(i) ? C.accent : C.border}`,
+      borderRadius: "6px",
+      color: schedule.days.includes(i) ? "#fff" : C.textMuted,
+      fontSize: "11px",
+      fontWeight: schedule.days.includes(i) ? "700" : "400",
+      fontFamily: "inherit",
+      cursor: "pointer"
+    }
+  }, day))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: C.textMuted,
+      marginBottom: "8px"
+    }
+  }, "Run at:"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "8px",
+      flexWrap: "wrap",
+      marginBottom: "16px"
+    }
+  }, [0, 1, 2, 3, 6, 9, 12, 18, 21, 23].map(h => /*#__PURE__*/React.createElement("button", {
+    key: h,
+    onClick: () => setSchedule(prev => ({
+      ...prev,
+      hour: h
+    })),
+    style: {
+      padding: "7px 12px",
+      background: schedule.hour === h ? C.accent : C.surface2,
+      border: `1px solid ${schedule.hour === h ? C.accent : C.border}`,
+      borderRadius: "6px",
+      color: schedule.hour === h ? "#fff" : C.textMuted,
+      fontSize: "12px",
+      fontWeight: schedule.hour === h ? "700" : "400",
+      fontFamily: "inherit",
+      cursor: "pointer"
+    }
+  }, h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`)))), /*#__PURE__*/React.createElement("button", {
+    onClick: saveSchedule,
+    style: {
+      width: "100%",
+      padding: "12px",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "10px",
+      color: C.text,
+      fontSize: "14px",
+      fontWeight: "600",
+      fontFamily: "inherit",
+      cursor: "pointer"
+    }
+  }, "Save Schedule"))));
+}
+function App() {
+  var _FREE_MODELS$find;
+  const [leads, setLeads] = useState([]);
+  const leadsRef = useRef([]);
+  const [activeCol, setActiveCol] = useState("new");
+  const [isDark, setIsDark] = useState(true);
+  const [openRouterKey, setOpenRouterKey] = useState(() => localStorage.getItem('originugc_orkey') || '');
+  const [selectedModel, setSelectedModel] = useState(FREE_MODELS[0].id);
+  const [showSettings, setShowSettings] = useState(false);
+  const [expandedId, setExpandedId] = useState(null);
+  const [generatingId, setGeneratingId] = useState(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [searchQ, setSearchQ] = useState("");
+  const [replyModal, setReplyModal] = useState(null);
+  const [replyText, setReplyText] = useState("");
+  const [appReady, setAppReady] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [showScraper, setShowScraper] = useState(false);
+  const C = isDark ? DARK : LIGHT;
+  const col = COLUMNS.find(c => c.id === activeCol);
+
+  // Keep ref always up to date with latest leads
+  useEffect(() => {
+    leadsRef.current = leads;
+  }, [leads]);
+  useEffect(() => {
+    const link = document.createElement("link");
+    link.href = "https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap";
+    link.rel = "stylesheet";
+    document.head.appendChild(link);
+    (async () => {
+      try {
+        const data = await sbLoad();
+        if (data) {
+          setLeads(data.leads || []);
+          if (data.orKey) setOpenRouterKey(data.orKey);
+        }
+      } catch (e) {
+        console.log("Load error:", e);
+      } finally {
+        setAppReady(true);
+      }
+    })();
+  }, []);
+  const [saveStatus, setSaveStatus] = useState("");
+  const save = async (l, key) => {
+    setSaveStatus("saving...");
+    const result = await sbSave({
+      leads: l,
+      orKey: key !== undefined ? key : openRouterKey
+    });
+    setSaveStatus(result === "cloud" ? "✓ synced to Sheets" : "✓ saved locally");
+    setTimeout(() => setSaveStatus(""), 3000);
+  };
+  const colLeads = useMemo(() => {
+    return leads.filter(l => {
+      var _l$brandName, _l$website;
+      const matchCol = l.status === activeCol;
+      const matchSearch = !searchQ || ((_l$brandName = l.brandName) === null || _l$brandName === void 0 ? void 0 : _l$brandName.toLowerCase().includes(searchQ.toLowerCase())) || ((_l$website = l.website) === null || _l$website === void 0 ? void 0 : _l$website.toLowerCase().includes(searchQ.toLowerCase()));
+      return matchCol && matchSearch;
+    });
+  }, [leads, activeCol, searchQ]);
+  const colCount = id => leads.filter(l => l.status === id).length;
+  async function addLead(data) {
+    const lead = {
+      ...data,
+      id: `lead_${Date.now()}`,
+      status: "new",
+      emailDraft: null,
+      emailSubject: null,
+      emailMode: null,
+      contacts: [],
+      notes: [{
+        text: "Lead added",
+        date: nowStr(),
+        auto: true
+      }],
+      sentAt: null,
+      followUpCount: 0,
+      flags: [],
+      addedAt: new Date().toISOString()
+    };
+    if (isMissingData(lead)) lead.flags = [...lead.flags, "missing_info"];
+    // leadsRef always has the freshest value — no stale closure possible
+    const updated = [lead, ...leadsRef.current];
+    setLeads(updated);
+    await save(updated);
+    setShowAdd(false);
+  }
+  async function generateEmail(id) {
+    setGeneratingId(id);
+    const lead = leads.find(l => l.id === id);
+    if (!lead) {
+      setGeneratingId(null);
+      return;
+    }
+    if (isMissingData(lead)) {
+      setGeneratingId(null);
+      return;
+    }
+    if (!openRouterKey.trim()) {
+      alert("Please enter your OpenRouter API key in the settings panel above before generating emails.");
+      setGeneratingId(null);
+      return;
+    }
+    try {
+      const aiCall = p => callOpenRouter(p, openRouterKey.trim(), selectedModel);
+      console.log('Generating email for:', lead.brandName, '| model:', selectedModel);
+
+      // Step 1: Fetch website text directly from browser (no API call needed)
+      let websiteContext = "";
+      const isFbUrl = (lead.website || "").includes("facebook.com");
+      if (!isFbUrl && lead.website) {
+        try {
+          const siteResp = await fetch(`https://corsproxy.io/?${encodeURIComponent(lead.website)}`, {
+            signal: AbortSignal.timeout(8000)
+          });
+          if (siteResp.ok) {
+            const raw = await siteResp.text();
+            const stripped = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+            // Take first 1500 chars — enough for mission/about context
+            websiteContext = stripped.slice(0, 1500);
+            console.log("Website text fetched:", websiteContext.slice(0, 100));
+          }
+        } catch (e) {
+          console.log("Website fetch skipped:", e.message);
+        }
+      }
+
+      // Step 2: Write the email with real website context if available
+      const text = await aiCall(`You are writing a cold pitch email on behalf of River and Kodi — two Canadian UGC (User Generated Content) ad creators at Origin UGC. They create high-converting video and photo content that brands use in their own paid ads. They are NOT influencers — they do not post to their own pages. The content they create runs on the BRAND'S channels as ads.
+
+BRAND: ${lead.brandName}
+WEBSITE: ${lead.website}
+CATEGORY: ${lead.description || "products in their niche"}
+${websiteContext ? `WEBSITE EXCERPT: "${websiteContext}"` : ""}
+
+HOW RIVER GENUINELY FEELS ABOUT THIS CATEGORY:
+${getCategoryFeeling(lead.description || "", lead.brandName)}
+
+PITCH TEMPLATE STRUCTURE (follow this exactly):
+
+[OPENING — 1-2 sentences personal and specific to this brand. Use the genuine feeling about the category below. Reference something real about the brand from the website excerpt if available. This should feel like River actually knows and cares about this brand — not generic.]
+
+[PROPOSITION — use this exact wording, do not change it:]
+My name is River, and along with my creative partner Kodi, we create UGC ad content for brands like yours — short-form video and photo assets your team can use directly in paid social campaigns on Meta and TikTok.
+
+[CLOSE — 1 sentence on why this brand specifically is a great fit for UGC content.]
+
+Would love to hear if there's an opportunity to work together.
+
+${SIGN_OFF}
+
+RULES:
+- Under 120 words total in the body
+- No filler openers ("I came across your brand", "I hope this email finds you well")
+- No insecurity tactics, no suggesting anything is lacking
+- NEVER use: skyrocket, game-changer, revolutionize, synergy, leverage, disrupt, elevate, transform, unlock, next-level
+- Sound like a real person, not a marketing agency
+- The subject line must ALWAYS be exactly: "Re: [@theoriginugc] x UGC Partnership"
+- Never change or vary the subject line format
+
+Return ONLY valid JSON, nothing else:
+{"subject": "Re: [@theoriginugc] x UGC Partnership", "body": "full email body here"}`);
+      const result = parseJSON(text);
+      if (!result) throw new Error("Parse failed — model returned: " + text.slice(0, 100));
+      const updated = leads.map(l => l.id === id ? {
+        ...l,
+        emailDraft: result.body,
+        emailSubject: result.subject,
+        emailMode: "ai",
+        status: "drafting",
+        notes: [...(l.notes || []), {
+          text: "Email generated via AI",
+          date: nowStr(),
+          auto: true
+        }]
+      } : l);
+      setLeads(updated);
+      await save(updated);
+      setActiveCol("drafting");
+      setExpandedId(id);
+    } catch (e) {
+      console.error(e);
+      alert(`Email generation failed: ${e.message}\n\nMake sure your OpenRouter key is valid and the model is available.`);
+    } finally {
+      setGeneratingId(null);
+    }
+  }
+  async function moveLead(id, toStatus) {
+    const now = new Date().toISOString();
+    const updated = leads.map(l => {
+      var _COLUMNS$find;
+      return l.id === id ? {
+        ...l,
+        status: toStatus,
+        sentAt: toStatus === "sent" ? now : l.sentAt,
+        notes: [...(l.notes || []), {
+          text: `Moved to ${(_COLUMNS$find = COLUMNS.find(c => c.id === toStatus)) === null || _COLUMNS$find === void 0 ? void 0 : _COLUMNS$find.label}`,
+          date: nowStr(),
+          auto: true
+        }]
+      } : l;
+    });
+    setLeads(updated);
+    await save(updated);
+  }
+  async function updateDraft(id, subject, body, website) {
+    const updated = leads.map(l => l.id === id ? {
+      ...l,
+      emailSubject: subject,
+      emailDraft: body,
+      ...(website ? {
+        website
+      } : {})
+    } : l);
+    setLeads(updated);
+    await save(updated);
+  }
+  async function flagLead(id, flag) {
+    const updated = leads.map(l => {
+      var _l$flags;
+      return l.id === id ? {
+        ...l,
+        flags: (_l$flags = l.flags) !== null && _l$flags !== void 0 && _l$flags.includes(flag) ? l.flags.filter(f => f !== flag) : [...(l.flags || []), flag]
+      } : l;
+    });
+    setLeads(updated);
+    await save(updated);
+  }
+  async function removeLead(id) {
+    const updated = leads.filter(l => l.id !== id);
+    setLeads(updated);
+    await save(updated);
+  }
+  async function logReply(id, text) {
+    const type = detectReplyType(text);
+    let statusUpdate = {};
+    let noteText = "";
+    if (type === "blacklist") {
+      statusUpdate = {
+        status: "closed",
+        flags: ["blacklisted"]
+      };
+      noteText = "🚫 Blacklisted — opted out";
+    } else if (type === "oot") {
+      statusUpdate = {
+        flags: ["oot"]
+      };
+      noteText = "⏸ OOO detected — follow-up paused";
+    } else if (type === "budget") {
+      statusUpdate = {
+        flags: ["budget_objection"]
+      };
+      noteText = "💬 Budget objection — downsell drafted";
+    } else if (type === "positive") {
+      statusUpdate = {
+        status: "active"
+      };
+      noteText = "✅ Positive reply — moved to Conversations";
+    } else {
+      noteText = "📩 Reply logged";
+    }
+    const updated = leads.map(l => l.id === id ? {
+      ...l,
+      ...statusUpdate,
+      notes: [...(l.notes || []), {
+        text: noteText,
+        date: nowStr(),
+        auto: true
+      }, {
+        text: `Reply: "${text.slice(0, 80)}${text.length > 80 ? "…" : ""}"`,
+        date: nowStr(),
+        auto: false
+      }]
+    } : l);
+    setLeads(updated);
+    await save(updated);
+    setReplyModal(null);
+    setReplyText("");
+  }
+  const gmailLink = lead => {
+    var _lead$contacts;
+    return `mailto:${((_lead$contacts = lead.contacts) === null || _lead$contacts === void 0 || (_lead$contacts = _lead$contacts[0]) === null || _lead$contacts === void 0 ? void 0 : _lead$contacts.email) || ""}?subject=${encodeURIComponent(lead.emailSubject || "")}&body=${encodeURIComponent(lead.emailDraft || "")}`;
+  };
+  async function sendEmail(lead) {
+    if (!lead.emailDraft || !lead.contact_email) return {
+      ok: false,
+      error: "Missing email or recipient"
+    };
+    try {
+      var _lead$contacts2;
+      const resp = await fetch(`${SERVER_URL}/api/gmail/send`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          to: ((_lead$contacts2 = lead.contacts) === null || _lead$contacts2 === void 0 || (_lead$contacts2 = _lead$contacts2[0]) === null || _lead$contacts2 === void 0 ? void 0 : _lead$contacts2.email) || lead.contact_email,
+          subject: lead.emailSubject || "",
+          body: lead.emailDraft || ""
+        })
+      });
+      if (resp.ok) return {
+        ok: true
+      };
+      return {
+        ok: false,
+        error: await resp.text()
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e.message
+      };
+    }
+  }
+  async function checkReplies(lead) {
+    var _lead$contacts3;
+    if (!lead.contact_email && (!lead.contacts || lead.contacts.length === 0)) return null;
+    const email = ((_lead$contacts3 = lead.contacts) === null || _lead$contacts3 === void 0 || (_lead$contacts3 = _lead$contacts3[0]) === null || _lead$contacts3 === void 0 ? void 0 : _lead$contacts3.email) || lead.contact_email;
+    try {
+      const resp = await fetch(`${SERVER_URL}/api/gmail/messages?q=from:${encodeURIComponent(email)}&maxResults=3`);
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      return data;
+    } catch (e) {
+      return null;
+    }
+  }
+  const T = {
+    fontFamily: "'Outfit', 'Google Sans', system-ui, sans-serif"
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      minHeight: "100vh",
+      background: C.bg,
+      color: C.text,
+      ...T,
+      transition: "background 0.2s, color 0.2s"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.header,
+      borderBottom: `1px solid ${C.border}`,
+      padding: "0 20px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      height: "56px",
+      boxShadow: C.shadow,
+      position: "sticky",
+      top: 0,
+      zIndex: 100
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: "10px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "28px",
+      height: "28px",
+      borderRadius: "6px",
+      background: C.accent,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#fff",
+      fontSize: "14px",
+      fontWeight: "700"
+    }
+  }, "O")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "15px",
+      fontWeight: "600",
+      lineHeight: 1.2
+    }
+  }, "Origin UGC"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "10px",
+      color: C.textMuted,
+      letterSpacing: "0.5px"
+    }
+  }, "OUTREACH PIPELINE"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: "8px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "12px",
+      marginRight: "8px"
+    }
+  }, [["new", "#00ACC1"], ["sent", "#EF6C00"], ["active", "#2E7D32"]].map(([id, c]) => /*#__PURE__*/React.createElement("div", {
+    key: id,
+    style: {
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "16px",
+      fontWeight: "700",
+      color: c,
+      lineHeight: 1
+    }
+  }, colCount(id)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "8px",
+      color: C.textDim,
+      letterSpacing: "0.5px",
+      textTransform: "uppercase"
+    }
+  }, id)))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowScraper(true),
+    style: {
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "7px 12px",
+      color: C.textMuted,
+      fontSize: "13px",
+      cursor: "pointer",
+      ...T
+    }
+  }, "\uD83E\uDD16 Scraper"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowSearch(true),
+    style: {
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "7px 12px",
+      color: C.textMuted,
+      fontSize: "13px",
+      fontWeight: "600",
+      cursor: "pointer",
+      ...T
+    }
+  }, "\uD83D\uDD0D Search"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowAdd(true),
+    disabled: !appReady,
+    style: {
+      background: appReady ? C.accent : C.surface2,
+      border: "none",
+      borderRadius: "6px",
+      padding: "7px 14px",
+      color: appReady ? "#fff" : C.textMuted,
+      fontSize: "13px",
+      fontWeight: "600",
+      cursor: appReady ? "pointer" : "not-allowed",
+      ...T
+    }
+  }, appReady ? "+ Add" : "Loading..."), saveStatus && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: saveStatus.includes("✓") ? "#2E7D32" : saveStatus.includes("✗") ? "#E53935" : C.textMuted,
+      fontWeight: "600"
+    }
+  }, saveStatus), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setIsDark(d => !d),
+    style: {
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "7px 10px",
+      color: C.textMuted,
+      fontSize: "14px",
+      cursor: "pointer",
+      ...T
+    }
+  }, isDark ? "☀️ Light" : "🌙 Dark"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      borderBottom: `1px solid ${C.border}`,
+      padding: "12px 20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "13px",
+      fontWeight: "600",
+      marginBottom: "12px",
+      color: C.text
+    }
+  }, "Email Generation Model"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "8px",
+      flexWrap: "wrap",
+      marginBottom: "14px"
+    }
+  }, FREE_MODELS.map(m => /*#__PURE__*/React.createElement("button", {
+    key: m.id,
+    onClick: () => setSelectedModel(m.id),
+    style: {
+      padding: "8px 14px",
+      background: selectedModel === m.id ? `${C.accent}15` : C.surface2,
+      border: `2px solid ${selectedModel === m.id ? C.accent : C.border}`,
+      borderRadius: "8px",
+      color: selectedModel === m.id ? C.accent : C.textMuted,
+      fontSize: "12px",
+      fontFamily: "inherit",
+      fontWeight: selectedModel === m.id ? "700" : "400",
+      cursor: "pointer"
+    }
+  }, m.label, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "10px",
+      opacity: 0.7
+    }
+  }, "\xB7 ", m.tag)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      marginBottom: "6px",
+      marginTop: "12px"
+    }
+  }, "OPENROUTER API KEY"), /*#__PURE__*/React.createElement("input", {
+    type: "password",
+    value: openRouterKey,
+    onChange: async e => {
+      const newKey = e.target.value;
+      setOpenRouterKey(newKey);
+      localStorage.setItem('originugc_orkey', newKey);
+      await save(leads, newKey);
+    },
+    placeholder: "sk-or-v1-...",
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "8px",
+      padding: "10px 14px",
+      color: C.text,
+      fontSize: "14px",
+      fontFamily: "inherit",
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: openRouterKey ? "#2E7D32" : C.textMuted,
+      marginTop: "6px",
+      fontWeight: openRouterKey ? "600" : "400"
+    }
+  }, openRouterKey ? `✓ Ready — using ${(_FREE_MODELS$find = FREE_MODELS.find(m => m.id === selectedModel)) === null || _FREE_MODELS$find === void 0 ? void 0 : _FREE_MODELS$find.label}` : "Enter key above to enable AI email generation")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "12px 20px 0",
+      background: C.header,
+      borderBottom: `1px solid ${C.border}`
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: searchQ,
+    onChange: e => setSearchQ(e.target.value),
+    placeholder: "Search brands...",
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "8px",
+      padding: "8px 14px",
+      color: C.text,
+      fontSize: "14px",
+      ...T,
+      outline: "none",
+      marginBottom: "12px"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "0",
+      overflowX: "auto",
+      scrollbarWidth: "none"
+    }
+  }, COLUMNS.map(c => {
+    const count = colCount(c.id);
+    const active = activeCol === c.id;
+    return /*#__PURE__*/React.createElement("button", {
+      key: c.id,
+      onClick: () => setActiveCol(c.id),
+      style: {
+        flexShrink: 0,
+        padding: "10px 16px",
+        background: "transparent",
+        border: "none",
+        borderBottom: active ? `2px solid ${c.accent}` : "2px solid transparent",
+        color: active ? c.accent : C.textMuted,
+        fontSize: "13px",
+        fontWeight: active ? "600" : "400",
+        cursor: "pointer",
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        ...T,
+        whiteSpace: "nowrap",
+        transition: "color 0.15s"
+      }
+    }, c.short, count > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        background: active ? c.accent : C.surface2,
+        color: active ? "#fff" : C.textMuted,
+        borderRadius: "10px",
+        padding: "1px 7px",
+        fontSize: "11px",
+        fontWeight: "600"
+      }
+    }, count));
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "16px 20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "13px",
+      color: C.textMuted,
+      marginBottom: "14px",
+      fontWeight: "500"
+    }
+  }, colLeads.length === 0 ? `No leads in ${col === null || col === void 0 ? void 0 : col.label}` : `${colLeads.length} lead${colLeads.length !== 1 ? "s" : ""} in ${col === null || col === void 0 ? void 0 : col.label}`), colLeads.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      padding: "60px 20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "40px",
+      marginBottom: "12px",
+      opacity: 0.3
+    }
+  }, "\u25CE"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "15px",
+      color: C.textMuted,
+      fontWeight: "500"
+    }
+  }, "Nothing here yet"), activeCol === "new" && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowAdd(true),
+    style: {
+      marginTop: "16px",
+      padding: "10px 20px",
+      background: C.accent,
+      border: "none",
+      borderRadius: "8px",
+      color: "#fff",
+      fontSize: "14px",
+      fontWeight: "600",
+      cursor: "pointer",
+      ...T
+    }
+  }, "Add your first lead")) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: "10px"
+    }
+  }, colLeads.map(lead => /*#__PURE__*/React.createElement(LeadCard, {
+    key: lead.id,
+    lead: lead,
+    C: C,
+    T: T,
+    col: col,
+    expanded: expandedId === lead.id,
+    isGenerating: generatingId === lead.id,
+    onExpand: () => setExpandedId(expandedId === lead.id ? null : lead.id),
+    onGenerate: () => generateEmail(lead.id),
+    onMove: moveLead,
+    onFlag: flagLead,
+    onRemove: () => removeLead(lead.id),
+    onUpdateDraft: updateDraft,
+    onLogReply: () => {
+      setReplyModal(lead.id);
+      setReplyText("");
+    },
+    gmailLink: gmailLink(lead),
+    onSendEmail: sendEmail,
+    onCheckReplies: checkReplies
+  })))), showScraper && /*#__PURE__*/React.createElement(ScraperPanel, {
+    C: C,
+    onClose: () => setShowScraper(false)
+  }), showSearch && /*#__PURE__*/React.createElement(SearchPanel, {
+    C: C,
+    onClose: () => setShowSearch(false)
+  }), showAdd && /*#__PURE__*/React.createElement(AddLeadPanel, {
+    C: C,
+    T: T,
+    onAdd: addLead,
+    onClose: () => setShowAdd(false)
+  }), replyModal && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.6)",
+      display: "flex",
+      alignItems: "flex-end",
+      zIndex: 200
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      borderRadius: "16px 16px 0 0",
+      padding: "24px 20px",
+      width: "100%",
+      boxSizing: "border-box"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "16px",
+      fontWeight: "600",
+      marginBottom: "6px"
+    }
+  }, "Log a Reply"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "13px",
+      color: C.textMuted,
+      marginBottom: "14px"
+    }
+  }, "Paste their reply. The system will categorize it automatically."), /*#__PURE__*/React.createElement("textarea", {
+    value: replyText,
+    onChange: e => setReplyText(e.target.value),
+    placeholder: "Paste their reply here...",
+    rows: 4,
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "8px",
+      padding: "12px",
+      color: C.text,
+      fontSize: "14px",
+      ...T,
+      outline: "none",
+      resize: "vertical",
+      marginBottom: "12px"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "8px"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => logReply(replyModal, replyText),
+    disabled: !replyText.trim(),
+    style: {
+      flex: 1,
+      padding: "12px",
+      background: replyText.trim() ? C.accent : C.surface2,
+      border: "none",
+      borderRadius: "8px",
+      color: replyText.trim() ? "#fff" : C.textMuted,
+      fontSize: "14px",
+      fontWeight: "600",
+      cursor: replyText.trim() ? "pointer" : "not-allowed",
+      ...T
+    }
+  }, "Categorize & Log"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setReplyModal(null);
+      setReplyText("");
+    },
+    style: {
+      padding: "12px 18px",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "8px",
+      color: C.textMuted,
+      fontSize: "14px",
+      ...T,
+      cursor: "pointer"
+    }
+  }, "Cancel")))));
+}
+function LeadCard({
+  lead,
+  C,
+  T,
+  col,
+  expanded,
+  isGenerating,
+  onExpand,
+  onGenerate,
+  onMove,
+  onFlag,
+  onRemove,
+  onUpdateDraft,
+  onLogReply,
+  gmailLink,
+  onSendEmail,
+  onCheckReplies
+}) {
+  var _lead$flags, _lead$flags2, _lead$flags3, _lead$notes;
+  const [editingEmail, setEditingEmail] = useState(false);
+  const [draftSubject, setDraftSubject] = useState(lead.emailSubject || "");
+  const [draftBody, setDraftBody] = useState(lead.emailDraft || "");
+  const [manualMode, setManualMode] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendResult, setSendResult] = useState(null);
+  const [checkingReplies, setCheckingReplies] = useState(false);
+  const [replyData, setReplyData] = useState(null);
+  const missing = isMissingData(lead);
+  const blacklisted = (_lead$flags = lead.flags) === null || _lead$flags === void 0 ? void 0 : _lead$flags.includes("blacklisted");
+  const oot = (_lead$flags2 = lead.flags) === null || _lead$flags2 === void 0 ? void 0 : _lead$flags2.includes("oot");
+  const budget = (_lead$flags3 = lead.flags) === null || _lead$flags3 === void 0 ? void 0 : _lead$flags3.includes("budget_objection");
+  const colIndex = COLUMNS.findIndex(c => c.id === lead.status);
+  const copy = () => {
+    navigator.clipboard.writeText(lead.emailDraft || "");
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+  const saveEdits = () => {
+    onUpdateDraft(lead.id, draftSubject, draftBody);
+    setEditingEmail(false);
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      borderRadius: "10px",
+      border: `1px solid ${missing ? "#E53935" : blacklisted ? "#E53935" : C.border}`,
+      boxShadow: C.shadow,
+      overflow: "hidden",
+      transition: "box-shadow 0.2s",
+      opacity: blacklisted ? 0.6 : 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "14px 16px"
+    },
+    onClick: onExpand
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "flex-start",
+      gap: "10px",
+      marginBottom: "6px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: "600",
+      fontSize: "15px",
+      lineHeight: "1.3",
+      color: C.text
+    }
+  }, lead.brandName || "Unknown Brand"), /*#__PURE__*/React.createElement("a", {
+    href: lead.website,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      fontSize: "12px",
+      color: C.accent,
+      marginTop: "2px",
+      display: "block",
+      textDecoration: "none",
+      wordBreak: "break-all"
+    },
+    onClick: e => e.stopPropagation()
+  }, lead.website)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "6px",
+      flexShrink: 0,
+      flexWrap: "wrap",
+      justifyContent: "flex-end"
+    }
+  }, lead.country && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "10px",
+      color: C.textDim,
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "4px",
+      padding: "2px 7px",
+      fontWeight: "500"
+    }
+  }, "\uD83C\uDF0D ", lead.country), lead.platform && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "10px",
+      color: col === null || col === void 0 ? void 0 : col.accent,
+      background: `${col === null || col === void 0 ? void 0 : col.accent}15`,
+      border: `1px solid ${col === null || col === void 0 ? void 0 : col.accent}30`,
+      borderRadius: "4px",
+      padding: "2px 7px",
+      fontWeight: "500"
+    }
+  }, lead.platform), missing && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "10px",
+      color: "#E53935",
+      background: "#FFEBEE",
+      borderRadius: "4px",
+      padding: "2px 7px",
+      fontWeight: "600"
+    }
+  }, "Missing Info"), blacklisted && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "10px",
+      color: "#E53935",
+      background: "#FFEBEE",
+      borderRadius: "4px",
+      padding: "2px 7px",
+      fontWeight: "600"
+    }
+  }, "\uD83D\uDEAB Blacklisted"), oot && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "10px",
+      color: "#EF6C00",
+      background: "#FFF3E0",
+      borderRadius: "4px",
+      padding: "2px 7px",
+      fontWeight: "600"
+    }
+  }, "\u23F8 OOO"), budget && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: "10px",
+      color: "#7C4DFF",
+      background: "#EDE7F6",
+      borderRadius: "4px",
+      padding: "2px 7px",
+      fontWeight: "600"
+    }
+  }, "\uD83D\uDCAC Budget"))), lead.description && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: C.textMuted,
+      lineHeight: "1.5"
+    }
+  }, lead.description), lead.est_ad_spend && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: "#EF6C00",
+      marginTop: "4px",
+      fontWeight: "500"
+    }
+  }, "\uD83D\uDCB0 Est. ", lead.est_ad_spend, "/mo"), lead.addedAt && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "10px",
+      color: C.textDim,
+      marginTop: "4px"
+    }
+  }, "Added ", new Date(lead.addedAt).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }))), !blacklisted && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "0 16px 12px",
+      display: "flex",
+      gap: "6px",
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("a", {
+    href: `https://www.facebook.com/ads/library/?q=${encodeURIComponent(lead.brandName || "")}&active_status=active&ad_type=all&country=ALL`,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      padding: "6px 10px",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      color: C.textMuted,
+      fontSize: "11px",
+      textDecoration: "none",
+      fontWeight: "500"
+    }
+  }, "Meta \u2197"), /*#__PURE__*/React.createElement("a", {
+    href: `https://library.tiktok.com/ads?region=US&keyword=${encodeURIComponent(lead.brandName || "")}`,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      padding: "6px 10px",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      color: C.textMuted,
+      fontSize: "11px",
+      textDecoration: "none",
+      fontWeight: "500"
+    }
+  }, "TikTok \u2197"), lead.status === "new" && !missing && /*#__PURE__*/React.createElement("button", {
+    onClick: () => onGenerate(),
+    disabled: isGenerating,
+    style: {
+      padding: "6px 10px",
+      background: isGenerating ? C.surface2 : `${C.accent}15`,
+      border: `1px solid ${isGenerating ? C.border : C.accent + "40"}`,
+      borderRadius: "6px",
+      color: isGenerating ? C.textMuted : C.accent,
+      fontSize: "11px",
+      ...T,
+      fontWeight: "600",
+      cursor: isGenerating ? "not-allowed" : "pointer"
+    }
+  }, isGenerating ? "⏳ Generating..." : "✦ Generate Email"), lead.status === "new" && !missing && (lead.website || "").includes("facebook.com") && !isGenerating && /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "100%",
+      marginTop: "4px"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    placeholder: "Paste brand's real website for better email research...",
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "6px 10px",
+      color: C.text,
+      fontSize: "11px",
+      fontFamily: "inherit",
+      outline: "none"
+    },
+    onKeyDown: e => {
+      if (e.key === "Enter" && e.target.value.trim()) {
+        onUpdateDraft(lead.id, lead.emailSubject, lead.emailDraft, e.target.value.trim());
+      }
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "10px",
+      color: C.textDim,
+      marginTop: "3px"
+    }
+  }, "Press Enter to save website, then generate email")), lead.status === "drafting" && lead.emailDraft && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+    onClick: async () => {
+      setSending(true);
+      setSendResult(null);
+      const result = await onSendEmail(lead);
+      setSending(false);
+      if (result !== null && result !== void 0 && result.ok) {
+        setSendResult("sent");
+        onMove(lead.id, "sent");
+      } else setSendResult("error");
+      setTimeout(() => setSendResult(null), 3000);
+    },
+    disabled: sending,
+    style: {
+      padding: "6px 10px",
+      background: sending ? C.surface2 : sendResult === "sent" ? "#2E7D32" : sendResult === "error" ? "#E53935" : C.accent,
+      borderRadius: "6px",
+      color: "#fff",
+      fontSize: "11px",
+      fontFamily: "inherit",
+      fontWeight: "600",
+      cursor: sending ? "not-allowed" : "pointer",
+      border: "none"
+    }
+  }, sending ? "⏳ Sending..." : sendResult === "sent" ? "✓ Sent!" : sendResult === "error" ? "✗ Failed" : "📨 Send Now"), /*#__PURE__*/React.createElement("a", {
+    href: gmailLink,
+    style: {
+      padding: "6px 10px",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      color: C.textMuted,
+      fontSize: "11px",
+      textDecoration: "none",
+      fontWeight: "500"
+    }
+  }, "Gmail \u2197")), lead.status === "sent" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+    onClick: async () => {
+      setCheckingReplies(true);
+      const data = await onCheckReplies(lead);
+      setReplyData(data);
+      setCheckingReplies(false);
+    },
+    style: {
+      padding: "6px 10px",
+      background: "#2E7D3215",
+      border: "1px solid #2E7D3240",
+      borderRadius: "6px",
+      color: "#2E7D32",
+      fontSize: "11px",
+      ...T,
+      fontWeight: "600",
+      cursor: "pointer"
+    }
+  }, checkingReplies ? "⏳ Checking..." : "🔍 Check Replies"), /*#__PURE__*/React.createElement("button", {
+    onClick: onLogReply,
+    style: {
+      padding: "6px 10px",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      color: C.textMuted,
+      fontSize: "11px",
+      ...T,
+      fontWeight: "500",
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDCE9 Log Reply")), replyData && replyData.messages && replyData.messages.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "100%",
+      background: "#2E7D3215",
+      border: "1px solid #2E7D3240",
+      borderRadius: "6px",
+      padding: "8px 12px",
+      fontSize: "11px",
+      color: "#2E7D32",
+      marginTop: "4px"
+    }
+  }, "\uD83D\uDCEC ", replyData.messages.length, " reply found! Log it below."), replyData && (!replyData.messages || replyData.messages.length === 0) && /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "100%",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "8px 12px",
+      fontSize: "11px",
+      color: C.textMuted,
+      marginTop: "4px"
+    }
+  }, "No replies yet."), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "4px",
+      marginLeft: "auto"
+    }
+  }, colIndex > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => onMove(lead.id, COLUMNS[colIndex - 1].id),
+    style: {
+      padding: "6px 8px",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      color: C.textMuted,
+      fontSize: "11px",
+      ...T,
+      cursor: "pointer"
+    }
+  }, "\u2190"), colIndex < COLUMNS.length - 1 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => onMove(lead.id, COLUMNS[colIndex + 1].id),
+    style: {
+      padding: "6px 8px",
+      background: C.surface2,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      color: C.textMuted,
+      fontSize: "11px",
+      ...T,
+      cursor: "pointer"
+    }
+  }, "\u2192")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onFlag(lead.id, "blacklisted"),
+    title: "Blacklist",
+    style: {
+      padding: "6px 8px",
+      background: "transparent",
+      border: "1px solid #E5393520",
+      borderRadius: "6px",
+      color: "#E5393550",
+      fontSize: "12px",
+      cursor: "pointer"
+    }
+  }, "\uD83D\uDEAB"), /*#__PURE__*/React.createElement("button", {
+    onClick: onRemove,
+    style: {
+      padding: "6px 8px",
+      background: "transparent",
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      color: C.textDim,
+      fontSize: "11px",
+      ...T,
+      cursor: "pointer"
+    }
+  }, "\u2715")), expanded && /*#__PURE__*/React.createElement("div", {
+    style: {
+      borderTop: `1px solid ${C.border}`,
+      background: C.bg
+    }
+  }, /*#__PURE__*/React.createElement(BrandPreview, {
+    lead: lead,
+    C: C
+  }), lead.emailDraft && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: "10px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      letterSpacing: "0.5px",
+      fontWeight: "600",
+      textTransform: "uppercase"
+    }
+  }, "Email Draft"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "6px"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => onGenerate(),
+    disabled: isGenerating,
+    style: {
+      padding: "4px 10px",
+      background: isGenerating ? C.surface2 : `${C.accent}15`,
+      border: `1px solid ${isGenerating ? C.border : C.accent + "40"}`,
+      borderRadius: "5px",
+      color: isGenerating ? C.textMuted : C.accent,
+      fontSize: "11px",
+      ...T,
+      cursor: isGenerating ? "not-allowed" : "pointer",
+      fontWeight: "600"
+    }
+  }, isGenerating ? "⏳..." : "↺ Redo"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setEditingEmail(!editingEmail);
+      setDraftSubject(lead.emailSubject || "");
+      setDraftBody(lead.emailDraft || "");
+    },
+    style: {
+      padding: "4px 10px",
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: "5px",
+      color: C.textMuted,
+      fontSize: "11px",
+      ...T,
+      cursor: "pointer"
+    }
+  }, editingEmail ? "Cancel" : "Edit"), /*#__PURE__*/React.createElement("button", {
+    onClick: copy,
+    style: {
+      padding: "4px 10px",
+      background: copied ? "#2E7D3215" : C.surface,
+      border: `1px solid ${copied ? "#2E7D32" : C.border}`,
+      borderRadius: "5px",
+      color: copied ? "#2E7D32" : C.textMuted,
+      fontSize: "11px",
+      ...T,
+      cursor: "pointer",
+      fontWeight: copied ? "600" : "400"
+    }
+  }, copied ? "✓ Copied" : "Copy"))), editingEmail ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("input", {
+    value: draftSubject,
+    onChange: e => setDraftSubject(e.target.value),
+    placeholder: "Subject line...",
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "8px 12px",
+      color: C.text,
+      fontSize: "13px",
+      fontWeight: "600",
+      ...T,
+      outline: "none",
+      marginBottom: "8px"
+    }
+  }), /*#__PURE__*/React.createElement("textarea", {
+    value: draftBody,
+    onChange: e => setDraftBody(e.target.value),
+    rows: 8,
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "10px 12px",
+      color: C.text,
+      fontSize: "13px",
+      lineHeight: "1.8",
+      ...T,
+      outline: "none",
+      resize: "vertical",
+      marginBottom: "8px"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: saveEdits,
+    style: {
+      width: "100%",
+      padding: "10px",
+      background: C.accent,
+      border: "none",
+      borderRadius: "6px",
+      color: "#fff",
+      fontSize: "13px",
+      fontWeight: "600",
+      ...T,
+      cursor: "pointer"
+    }
+  }, "Save Changes")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: C.textMuted,
+      marginBottom: "6px"
+    }
+  }, "Subject: ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: C.text,
+      fontWeight: "600"
+    }
+  }, lead.emailSubject)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: "8px",
+      padding: "14px",
+      fontSize: "13px",
+      lineHeight: "1.8",
+      color: C.textMuted,
+      whiteSpace: "pre-wrap"
+    }
+  }, lead.emailDraft))), (lead.status === "new" || lead.status === "drafting") && !lead.emailDraft && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "16px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      letterSpacing: "0.5px",
+      fontWeight: "600",
+      textTransform: "uppercase",
+      marginBottom: "10px"
+    }
+  }, "Manual Email"), /*#__PURE__*/React.createElement("input", {
+    placeholder: "Subject line...",
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "8px 12px",
+      color: C.text,
+      fontSize: "13px",
+      fontWeight: "600",
+      ...T,
+      outline: "none",
+      marginBottom: "8px"
+    },
+    onChange: e => setDraftSubject(e.target.value),
+    value: draftSubject
+  }), /*#__PURE__*/React.createElement("textarea", {
+    rows: 6,
+    placeholder: "Write your email here...",
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "10px 12px",
+      color: C.text,
+      fontSize: "13px",
+      lineHeight: "1.8",
+      ...T,
+      outline: "none",
+      resize: "vertical",
+      marginBottom: "8px"
+    },
+    onChange: e => setDraftBody(e.target.value),
+    value: draftBody
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onUpdateDraft(lead.id, draftSubject, draftBody);
+      onMove(lead.id, "drafting");
+    },
+    disabled: !draftBody.trim(),
+    style: {
+      width: "100%",
+      padding: "10px",
+      background: draftBody.trim() ? C.accent : C.surface2,
+      border: "none",
+      borderRadius: "6px",
+      color: draftBody.trim() ? "#fff" : C.textMuted,
+      fontSize: "13px",
+      fontWeight: "600",
+      ...T,
+      cursor: draftBody.trim() ? "pointer" : "not-allowed"
+    }
+  }, "Save & Move to Drafts")), lead.scrapedCopy && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "0 16px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      letterSpacing: "0.5px",
+      fontWeight: "600",
+      textTransform: "uppercase",
+      marginBottom: "6px"
+    }
+  }, "Scraped Ad Copy"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      border: `1px solid ${C.border}`,
+      borderRadius: "6px",
+      padding: "10px 12px",
+      fontSize: "12px",
+      color: C.textMuted,
+      lineHeight: "1.6",
+      fontStyle: "italic"
+    }
+  }, "\"", lead.scrapedCopy, "\"")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "0 16px 14px"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowNotes(o => !o),
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      background: "transparent",
+      border: "none",
+      cursor: "pointer",
+      ...T,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      textTransform: "uppercase",
+      padding: 0
+    }
+  }, showNotes ? "▲ Hide" : "▼ Activity", " ", ((_lead$notes = lead.notes) === null || _lead$notes === void 0 ? void 0 : _lead$notes.length) > 0 ? `(${lead.notes.length})` : ""), showNotes && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: "8px"
+    }
+  }, (lead.notes || []).map((n, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      gap: "8px",
+      marginBottom: "6px",
+      alignItems: "flex-start"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "10px",
+      color: C.textDim,
+      whiteSpace: "nowrap",
+      marginTop: "2px",
+      flexShrink: 0
+    }
+  }, n.date), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "12px",
+      color: n.auto ? C.textMuted : C.text,
+      fontStyle: n.auto ? "italic" : "normal"
+    }
+  }, n.text)))))));
+}
+function AddLeadPanel({
+  C,
+  T,
+  onAdd,
+  onClose
+}) {
+  const [form, setForm] = useState({
+    brandName: "",
+    website: "",
+    description: "",
+    country: "Canada",
+    platform: "Manual",
+    est_ad_spend: "",
+    scrapedCopy: "",
+    contact_email: ""
+  });
+  const set = (k, v) => setForm(f => ({
+    ...f,
+    [k]: v
+  }));
+  const inp = {
+    width: "100%",
+    boxSizing: "border-box",
+    background: C.surface2,
+    border: `1px solid ${C.border}`,
+    borderRadius: "8px",
+    padding: "11px 14px",
+    color: C.text,
+    fontSize: "14px",
+    ...T,
+    outline: "none",
+    marginBottom: "12px"
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.5)",
+      zIndex: 200,
+      display: "flex",
+      alignItems: "flex-end"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: C.surface,
+      borderRadius: "16px 16px 0 0",
+      padding: "24px 20px",
+      width: "100%",
+      boxSizing: "border-box",
+      maxHeight: "85vh",
+      overflowY: "auto"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: "20px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: "17px",
+      fontWeight: "600"
+    }
+  }, "Add New Lead"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: "transparent",
+      border: "none",
+      color: C.textMuted,
+      fontSize: "20px",
+      cursor: "pointer",
+      lineHeight: 1
+    }
+  }, "\u2715")), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      display: "block",
+      marginBottom: "6px"
+    }
+  }, "BRAND NAME *"), /*#__PURE__*/React.createElement("input", {
+    value: form.brandName,
+    onChange: e => set("brandName", e.target.value),
+    placeholder: "e.g. Venom Scents",
+    style: inp
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      display: "block",
+      marginBottom: "6px"
+    }
+  }, "WEBSITE *"), /*#__PURE__*/React.createElement("input", {
+    value: form.website,
+    onChange: e => set("website", e.target.value),
+    placeholder: "https://example.com",
+    style: inp
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      display: "block",
+      marginBottom: "6px"
+    }
+  }, "CONTACT EMAIL *"), /*#__PURE__*/React.createElement("input", {
+    value: form.contact_email,
+    onChange: e => set("contact_email", e.target.value),
+    placeholder: "e.g. marketing@brand.com",
+    style: {
+      ...inp,
+      marginBottom: "20px"
+    }
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      display: "block",
+      marginBottom: "6px"
+    }
+  }, "WHAT THEY SELL"), /*#__PURE__*/React.createElement("input", {
+    value: form.description,
+    onChange: e => set("description", e.target.value),
+    placeholder: "One sentence about their products",
+    style: inp
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      display: "block",
+      marginBottom: "6px"
+    }
+  }, "COUNTRY"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "6px",
+      flexWrap: "wrap",
+      marginBottom: "12px"
+    }
+  }, ["Canada", "United States", "United Kingdom", "Australia", "Other"].map(c => /*#__PURE__*/React.createElement("button", {
+    key: c,
+    onClick: () => set("country", c),
+    style: {
+      padding: "7px 12px",
+      background: form.country === c ? `${C.accent}20` : C.surface2,
+      border: `1px solid ${form.country === c ? C.accent : C.border}`,
+      borderRadius: "6px",
+      color: form.country === c ? C.accent : C.textMuted,
+      fontSize: "12px",
+      fontWeight: form.country === c ? "600" : "400",
+      cursor: "pointer",
+      ...T
+    }
+  }, c === "Canada" ? "🇨🇦 " : c === "United States" ? "🇺🇸 " : c === "United Kingdom" ? "🇬🇧 " : c === "Australia" ? "🇦🇺 " : "🌍 ", c))), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      display: "block",
+      marginBottom: "6px"
+    }
+  }, "SOURCE PLATFORM"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: "6px",
+      marginBottom: "12px"
+    }
+  }, ["Manual", "Meta", "TikTok", "Referral"].map(p => /*#__PURE__*/React.createElement("button", {
+    key: p,
+    onClick: () => set("platform", p),
+    style: {
+      padding: "7px 12px",
+      background: form.platform === p ? `${C.accent}20` : C.surface2,
+      border: `1px solid ${form.platform === p ? C.accent : C.border}`,
+      borderRadius: "6px",
+      color: form.platform === p ? C.accent : C.textMuted,
+      fontSize: "12px",
+      fontWeight: form.platform === p ? "600" : "400",
+      cursor: "pointer",
+      ...T
+    }
+  }, p))), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      display: "block",
+      marginBottom: "6px"
+    }
+  }, "EST. AD SPEND (optional)"), /*#__PURE__*/React.createElement("input", {
+    value: form.est_ad_spend,
+    onChange: e => set("est_ad_spend", e.target.value),
+    placeholder: "e.g. $5K\u2013$20K/month",
+    style: inp
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      fontSize: "11px",
+      color: C.textMuted,
+      fontWeight: "600",
+      letterSpacing: "0.5px",
+      display: "block",
+      marginBottom: "6px"
+    }
+  }, "SCRAPED AD COPY (optional)"), /*#__PURE__*/React.createElement("textarea", {
+    value: form.scrapedCopy,
+    onChange: e => set("scrapedCopy", e.target.value),
+    placeholder: "Paste their ad or post copy here for personalized AI email...",
+    rows: 3,
+    style: {
+      ...inp,
+      resize: "vertical",
+      marginBottom: "16px"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onAdd(form),
+    disabled: !form.brandName.trim() || !form.website.trim(),
+    style: {
+      width: "100%",
+      padding: "14px",
+      background: form.brandName.trim() && form.website.trim() ? C.accent : C.surface2,
+      border: "none",
+      borderRadius: "8px",
+      color: form.brandName.trim() && form.website.trim() ? "#fff" : C.textMuted,
+      fontSize: "15px",
+      fontWeight: "600",
+      cursor: form.brandName.trim() && form.website.trim() ? "pointer" : "not-allowed",
+      ...T
+    }
+  }, "Add Lead \u2192")));
+}
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
